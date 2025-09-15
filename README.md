@@ -48,7 +48,9 @@ Open your terminal or command prompt, navigate to the folder where you saved the
 
 #### **Method A: Interactive Prompt (Recommended)**
 
+```
 node kinx.mjs
+```
 
 The script will securely prompt you to paste your Firebase refresh token. The token will be masked with asterisks (\*) and will not be saved in your shell history.
 
@@ -56,14 +58,20 @@ The script will securely prompt you to paste your Firebase refresh token. The to
 
 This method is more secure as it prevents the token from being saved in your shell history.
 
-* **macOS/Linux:**  
+* **macOS/Linux:**
+```
   KINDROID\_REFRESH\_TOKEN="PASTE\_TOKEN\_HERE" node kinx.mjs
+```
 
 * **Windows (CMD):**  
+```
   set KINDROID\_REFRESH\_TOKEN="PASTE\_TOKEN\_HERE" && node kinx.mjs
+```
 
 * **Windows (PowerShell):**  
+```
   $env:KINDROID\_REFRESH\_TOKEN="PASTE\_TOKEN\_HERE"; node kinx.mjs
+```
 
 ### **4\. Navigate the Menu**
 
@@ -85,7 +93,6 @@ Choose source (Esc to exit):
 
 The script will create a directory structure to store your exported data:
 
-.  
 ├── Kins/  
 │   └── Kin\_Name (kin\_id)/  
 │       ├── Selfies/  
