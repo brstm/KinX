@@ -1,4 +1,4 @@
-# **KinX \- A Kindroid Exporter**
+# **KinX - A Kindroid Exporter**
 
 **KinX** is a powerful, secure command-line tool for exporting all your data and media from the Kindroid service. It provides a complete, local backup of your Kin profiles, chat messages, journals, selfies, and videos.
 
@@ -26,11 +26,11 @@ The tool communicates directly with Kindroid's Firebase backend, just like the o
 
 ## **Usage**
 
-### **1\. Get the Script**
+### **1. Get the Script**
 
 Download the kinx.mjs script to a folder on your computer.
 
-### **2\. Find Your Firebase Refresh Token**
+### **2. Find Your Firebase Refresh Token**
 
 **⚠️ Warning:** The refresh token acts as a long-term password for your account. **Keep it secret and secure.**
 
@@ -38,11 +38,11 @@ Download the kinx.mjs script to a folder on your computer.
 2. Open the browser's **Developer Tools** (usually by pressing F12 or right-clicking the page and selecting "Inspect").  
 3. Go to the **Application** tab (it might be called "Storage" in Firefox).  
 4. On the left-hand side, find and expand the **IndexedDB** section. Select the firebaseLocalStorageDb option within it.  
-5. A table will appear. Find the key that looks like firebase:authUser:AIza...:\[DEFAULT\]. Click on this row.  
+5. A table will appear. Find the key that looks like firebase:authUser:AIza...:[DEFAULT]. Click on this row.  
 6. A value panel will appear below or to the side. Inside this panel, you will see the value property, which contains a block of JSON text.  
 7. Find the refreshToken property within that text and **carefully copy its entire value** (the long string inside the quotes).
 
-### **3\. Run the Exporter**
+### **3. Run the Exporter**
 
 Open your terminal or command prompt, navigate to the folder where you saved the script, and run it using one of the two methods below.
 
@@ -52,7 +52,7 @@ Open your terminal or command prompt, navigate to the folder where you saved the
 node kinx.mjs
 ```
 
-The script will securely prompt you to paste your Firebase refresh token. The token will be masked with asterisks (\*) and will not be saved in your shell history.
+The script will securely prompt you to paste your Firebase refresh token. The token will be masked with asterisks (*) and will not be saved in your shell history.
 
 #### **Method B: Environment Variable (Advanced/Scripting)**
 
@@ -73,7 +73,7 @@ This method is more secure as it prevents the token from being saved in your she
   $env:KINDROID_REFRESH_TOKEN="PASTE_TOKEN_HERE"; node kinx.mjs
 ```
 
-### **4\. Navigate the Menu**
+### **4. Navigate the Menu**
 
 Once authenticated, you will see the main menu:
 
@@ -98,25 +98,25 @@ The script will create a directory structure to store your exported data:
 ```
 .
 ├── Kins/  
-│   └── Kin\_Name (kin\_id)/  
+│   └── Kin_Name (kin_id)/  
 │       ├── Selfies/  
-│       │   ├── image\_id\_1.jpg  
-│       │   └── image\_id\_2.jpg  
+│       │   ├── image_id_1.jpg  
+│       │   └── image_id_2.jpg  
 │       ├── Video Selfies/  
-│       │   └── video\_id\_1.mp4  
+│       │   └── video_id_1.mp4  
 │       ├── profile.json  
-│       ├── chat\_messages.json  
+│       ├── chat_messages.json  
 │       ├── journal.json  
 │       ├── selfies.json  
-│       └── video\_selfies.json  
+│       └── video_selfies.json  
 │  
 ├── Group Chats/  
-│   └── Group\_Name (group\_id)/  
+│   └── Group_Name (group_id)/  
 │       ├── profile.json  
-│       └── chat\_messages.json  
+│       └── chat_messages.json  
 │  
 └── Global Journal/  
-    └── global\_journal.json
+    └── global_journal.json
 ```
 
 ## **Security Warning**
