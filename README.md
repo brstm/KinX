@@ -60,28 +60,30 @@ This method is more secure as it prevents the token from being saved in your she
 
 * **macOS/Linux:**
 ```
-  KINDROID\_REFRESH\_TOKEN="PASTE\_TOKEN\_HERE" node kinx.mjs
+  KINDROID_REFRESH_TOKEN="PASTE_TOKEN_HERE" node kinx.mjs
 ```
 
 * **Windows (CMD):**  
 ```
-  set KINDROID\_REFRESH\_TOKEN="PASTE\_TOKEN\_HERE" && node kinx.mjs
+  set KINDROID_REFRESH_TOKEN="PASTE_TOKEN_HERE" && node kinx.mjs
 ```
 
 * **Windows (PowerShell):**  
 ```
-  $env:KINDROID\_REFRESH\_TOKEN="PASTE\_TOKEN\_HERE"; node kinx.mjs
+  $env:KINDROID_REFRESH_TOKEN="PASTE_TOKEN_HERE"; node kinx.mjs
 ```
 
 ### **4\. Navigate the Menu**
 
 Once authenticated, you will see the main menu:
 
-\--- Sources \---  
-  \[0\] Kins  
-  \[1\] Group Chats  
-  \[2\] Global Journal  
-  \[3\] Export All
+```
+--- Sources ---  
+  [0] Kins  
+  [1] Group Chats  
+  [2] Global Journal  
+  [3] Export All
+```
 
 Choose source (Esc to exit):
 
@@ -93,6 +95,8 @@ Choose source (Esc to exit):
 
 The script will create a directory structure to store your exported data:
 
+```
+.
 ├── Kins/  
 │   └── Kin\_Name (kin\_id)/  
 │       ├── Selfies/  
@@ -113,6 +117,7 @@ The script will create a directory structure to store your exported data:
 │  
 └── Global Journal/  
     └── global\_journal.json
+```
 
 ## **Security Warning**
 
