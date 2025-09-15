@@ -1,12 +1,10 @@
-// kinx.mjs
 /**
- * @file A command-line tool for exporting data from the Kindroid service via its Firebase backend.
+ * @file A command-line tool for exporting data and media from the Kindroid service.
  * @description This script authenticates using a Firebase refresh token, then provides an interactive menu
- * to export data for individual "Kins", "Group Chats", or the "Global Journal".
- * All data is saved locally into structured JSON files. The script handles pagination,
- * decryption of sensitive fields, and organizes outputs into clear directory structures.
+ * to export data for individual "Kins", "Group Chats", or the "Global Journal". It can also perform a
+ * full-account backup, including all media files, with a single command.
  *
- * @version 1.1.0
+ * @version 1.3.0
  *
  * @requires Node.js v18+ (for native fetch)
  *
@@ -14,7 +12,6 @@
  * provided via this environment variable to bypass the manual prompt.
  */
 
-import { stdin, stdout } from 'node:process';
 import { stdin as input, stdout as output } from 'node:process';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -37,9 +34,14 @@ const CONFIG = {
   KINS_PARENT_DIR: 'Kins',
   GROUPS_PARENT_DIR: 'Group Chats',
   GLOBAL_PARENT_DIR: 'Global Journal',
+  SELFIES_SUBDIR: 'Selfies',
+  VIDEO_SELFIES_SUBDIR: 'Video Selfies',
+
+  // Media download settings
+  DOWNLOAD_CONCURRENCY: 8, // Number of simultaneous media downloads
 
   // A user agent helps identify this script's traffic to the backend API.
-  USER_AGENT: 'KindroidExporter/1.1.0'
+  USER_AGENT: 'KinX-Exporter/1.3.0'
 };
 
 // ================================================================================================
@@ -49,15 +51,15 @@ const CONFIG = {
 /**
  * A robust raw-mode input handler. This function takes direct control of the TTY
  * to provide a better user experience for interactive prompts, supporting masking
- * and the Escape key. It resolves the three identified console bugs.
+ * and the Escape key.
  * @param {string} promptText The prompt text to display.
  * @param {{mask: boolean}} [options={mask: false}] Options for the prompt.
  * @returns {Promise<{esc: boolean, value: string | null}>} An object with the result.
  */
 function promptRaw(promptText, options = { mask: false }) {
     return new Promise((resolve) => {
-        const stdin = process.stdin;
-        const stdout = process.stdout;
+        const stdin = input;
+        const stdout = output;
         const wasRaw = stdin.isRaw;
         const buffer = [];
 
@@ -90,19 +92,13 @@ function promptRaw(promptText, options = { mask: false }) {
                 case '\b': // Backspace (Windows)
                     if (buffer.length > 0) {
                         buffer.pop();
-                        // Move cursor left, write a space to erase, then move left again.
-                        stdout.write('\b \b');
+                        stdout.write('\b \b'); // Move cursor left, erase, move left again
                     }
                     break;
                 default:
-                    // Only process printable characters
                     if (char >= ' ') {
                         buffer.push(char);
-                        if (options.mask) {
-                            stdout.write('*');
-                        } else {
-                            stdout.write(char);
-                        }
+                        stdout.write(options.mask ? '*' : char);
                     }
                     break;
             }
@@ -115,7 +111,6 @@ function promptRaw(promptText, options = { mask: false }) {
     });
 }
 
-
 /**
  * Prompts the user for sensitive input, masking it with asterisks.
  * @param {string} query The prompt text to display.
@@ -127,8 +122,7 @@ async function promptMasked(query) {
 }
 
 /**
- * A raw-mode input handler that listens for a single line of input.
- * Supports numeric input for menus and the Escape key to go back.
+ * Prompts the user for a single line of input.
  * @param {string} promptText The prompt text to display.
  * @returns {Promise<{esc: boolean, value: string | null}>} An object indicating if Esc was pressed.
  */
@@ -157,6 +151,20 @@ async function askMenu(title, options, footer = 'Choose index (Esc to go back): 
     return { esc: false, index };
 }
 
+/**
+ * Asks a Yes/No question.
+ * @param {string} question The question to ask.
+ * @returns {Promise<boolean>} True for 'yes', false for 'no'.
+ */
+async function askYesNo(question) {
+    while (true) {
+        const { esc, value } = await promptLineOrEsc(`${question} [y/n]: `);
+        if (esc) return false;
+        const answer = value?.toLowerCase();
+        if (answer === 'y' || answer === 'yes') return true;
+        if (answer === 'n' || answer === 'no') return false;
+    }
+}
 
 // ================================================================================================
 // --- API & AUTHENTICATION ---
@@ -268,14 +276,12 @@ function decryptEncString(opensslBase64, uidPassword) {
     const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
     return decrypted.toString('utf8');
   } catch (error) {
-    // console.warn(`Decryption failed for a value. It will be left as is. Error: ${error.message}`);
     return null; // Return null to indicate failure
   }
 }
 
 /**
  * Recursively decodes a Firestore value object into a plain JavaScript type.
- * It handles decryption for strings prefixed with "!enc:".
  * @param {object} firestoreValue The Firestore value object (e.g., { stringValue: 'hello' }).
  * @param {string} uid The user's ID, used as the password for decryption.
  * @returns {any} The decoded JavaScript value.
@@ -306,7 +312,6 @@ function decodeValue(firestoreValue, uid) {
     case 'arrayValue':
       return (value.values || []).map(v => decodeValue(v, uid));
     default:
-      // Includes bytesValue, referenceValue, geoPointValue, etc.
       return firestoreValue;
   }
 }
@@ -381,7 +386,6 @@ function valueForCursor(doc, field) {
 
 /**
  * Executes a structured query to fetch all documents from a subcollection, handling pagination with cursors.
- * This is generally more efficient and reliable than `listAll` for large collections.
  * @param {string} parentDocPath Path to the parent document.
  * @param {string} collectionId The ID of the subcollection.
  * @param {Record<string, string>} headers Request headers.
@@ -412,7 +416,6 @@ async function runQueryAll(parentDocPath, collectionId, headers, orderField = 't
     }
 
     const rows = await httpPOST(`${firestoreUrl(parentDocPath)}:runQuery`, headers, query);
-    // runQuery returns an array of objects, each containing a 'document' property
     const docsInPage = rows.map(r => r.document).filter(Boolean);
 
     if (docsInPage.length === 0) break;
@@ -424,8 +427,7 @@ async function runQueryAll(parentDocPath, collectionId, headers, orderField = 't
 }
 
 /**
- * A specialized query runner for journal entries, which must be ordered by the 'created' field.
- * Falls back to `listAll` if a permissions error suggests indexes are not configured.
+ * A specialized query runner for journal entries, ordered by the 'created' field.
  * @param {object} params
  * @param {string} params.parentDocPath Path to the parent document.
  * @param {string} params.collectionId The collection ID (e.g., 'JournalV3').
@@ -435,21 +437,18 @@ async function runQueryAll(parentDocPath, collectionId, headers, orderField = 't
 async function fetchJournalAll(params) {
   const { parentDocPath, collectionId, headers } = params;
   try {
-    // Attempt the more efficient indexed query first.
     return await runQueryAll(parentDocPath, collectionId, headers, 'created');
   } catch (e) {
-    // If it fails with a permission error, it's likely due to missing composite indexes.
-    // The `listAll` method can sometimes work as a fallback.
     if (String(e).includes('PERMISSION_DENIED') || String(e).includes('403')) {
       console.warn(`  - Query failed (permission denied), attempting fallback list method. This may be slower.`);
       return await listAll(`${parentDocPath}/${collectionId}`, headers, 'created asc,__name__ asc');
     }
-    throw e; // Re-throw other errors
+    throw e;
   }
 }
 
 // ================================================================================================
-// --- EXPORT LOGIC ---
+// --- EXPORT & DOWNLOAD LOGIC ---
 // ================================================================================================
 
 /**
@@ -499,14 +498,91 @@ function sortByCreateTimeAsc(docs) {
     });
 }
 
+/**
+ * Extracts a clean <id>.<ext> filename from a URL.
+ * @param {string} urlString The URL to parse.
+ * @returns {string} A sanitized filename like "some_id.jpeg".
+ */
+function filenameFromUrl(urlString) {
+    try {
+        const url = new URL(urlString);
+        const decoded = decodeURIComponent(url.pathname);
+        const base = decoded.split('/').pop().split('\\').pop();
+
+        const match = base.match(/(.+)\.([A-Za-z0-9]+)$/);
+        if (!match) return base; // No extension, fallback to full base
+
+        const [, stem, ext] = match;
+        const id = stem.includes('_') ? stem.split('_').pop() : stem;
+        return `${id}.${ext.toLowerCase()}`;
+    } catch {
+        return `download_${Date.now()}.bin`;
+    }
+}
+
+/**
+ * Downloads a list of media items concurrently.
+ * @param {Array<{url: string, dest: string}>} items The items to download.
+ */
+async function downloadMedia(items) {
+    if (items.length === 0) return;
+    console.log(`\nStarting download of ${items.length} media file(s)...`);
+
+    let completed = 0;
+    let failed = 0;
+    const total = items.length;
+    let itemsToProcess = [...items]; // Create a copy to consume
+
+    const updateProgress = () => {
+        const percent = ((completed + failed) / total * 100).toFixed(1);
+        output.clearLine(0);
+        output.cursorTo(0);
+        output.write(`  Progress: ${completed}/${total} downloaded, ${failed} failed (${percent}%)`);
+        if (completed + failed === total) {
+            output.write('\n');
+        }
+    };
+
+    const worker = async () => {
+        while (itemsToProcess.length > 0) {
+            const item = itemsToProcess.pop();
+            if (!item) continue;
+
+            try {
+                await fs.access(item.dest);
+            } catch {
+                try {
+                    const response = await fetch(item.url);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const buffer = Buffer.from(await response.arrayBuffer());
+                    await fs.writeFile(item.dest, buffer);
+                } catch (e) {
+                    failed++;
+                    console.warn(`\n  - Failed to download ${path.basename(item.dest)}: ${e.message}`);
+                    updateProgress(); // Update progress on failure too
+                    continue;
+                }
+            }
+            completed++;
+            updateProgress();
+        }
+    };
+
+    updateProgress();
+    const workers = Array.from({ length: Math.min(CONFIG.DOWNLOAD_CONCURRENCY, items.length) }, worker);
+    await Promise.all(workers);
+
+    console.log(`✓ Media download complete. Success: ${completed}, Failed: ${failed}.`);
+}
 
 /**
  * Fetches and exports all data related to a single Kin.
  * @param {string} uid The user ID.
  * @param {Record<string, string>} headers The request headers.
  * @param {{id: string, name: string}} kin The Kin object to export.
+ * @param {{forceDownloadMedia: boolean}} [options] Export options.
  */
-async function exportKin(uid, headers, kin) {
+async function exportKin(uid, headers, kin, options = { forceDownloadMedia: false }) {
   const subfolder = sanitize(`${kin.name} (${kin.id})`);
   const outputDir = path.join(CONFIG.KINS_PARENT_DIR, subfolder);
   console.log(`\nExporting Kin "${kin.name}" to "${outputDir}"...`);
@@ -516,7 +592,6 @@ async function exportKin(uid, headers, kin) {
   const profileDoc = await httpGET(firestoreUrl(kinPath), headers);
   await writeJSON(path.join(outputDir, 'profile.json'), packDocs([profileDoc], uid)[0]);
 
-  // Use runQuery with fallback to listAll for chat messages
   let chatDocs;
   try {
       chatDocs = await runQueryAll(kinPath, 'ChatMessages', headers, 'timestamp');
@@ -528,7 +603,6 @@ async function exportKin(uid, headers, kin) {
     count: chatDocs.length, items: packDocs(chatDocs, uid)
   });
 
-  // Pinned messages often don't have an index, so listAll and client-side sort is best.
   let pinnedDocs = await listAll(`${kinPath}/PinnedMessages`, headers);
   pinnedDocs = sortByCreateTimeAsc(pinnedDocs);
   await writeJSON(path.join(outputDir, 'pinned_messages.json'), {
@@ -541,16 +615,38 @@ async function exportKin(uid, headers, kin) {
   });
 
   const selfiesDocs = await listAll(`${kinPath}/Selfies`, headers, 'timestamp asc,__name__ asc');
+  const packedSelfies = packDocs(selfiesDocs, uid);
   await writeJSON(path.join(outputDir, 'selfies.json'), {
-    count: selfiesDocs.length, items: packDocs(selfiesDocs, uid)
+    count: packedSelfies.length, items: packedSelfies
   });
 
   const videoSelfiesDocs = await listAll(`${kinPath}/VideoSelfies`, headers, 'timestamp asc,__name__ asc');
+  const packedVideoSelfies = packDocs(videoSelfiesDocs, uid);
   await writeJSON(path.join(outputDir, 'video_selfies.json'), {
-    count: videoSelfiesDocs.length, items: packDocs(videoSelfiesDocs, uid)
+    count: packedVideoSelfies.length, items: packedVideoSelfies
   });
 
-  console.log('✓ Kin export complete.');
+  console.log('✓ Kin JSON export complete.');
+
+  // --- Integrated Media Download ---
+  const doDownload = options.forceDownloadMedia || await askYesNo('Download all selfie and video media for this Kin?');
+  if (doDownload) {
+      const selfiesDir = path.join(outputDir, CONFIG.SELFIES_SUBDIR);
+      await fs.mkdir(selfiesDir, { recursive: true });
+      const selfiesToDownload = packedSelfies
+          .map(s => s.data.url)
+          .filter(Boolean)
+          .map(url => ({ url, dest: path.join(selfiesDir, filenameFromUrl(url)) }));
+
+      const videoSelfiesDir = path.join(outputDir, CONFIG.VIDEO_SELFIES_SUBDIR);
+      await fs.mkdir(videoSelfiesDir, { recursive: true });
+      const videosToDownload = packedVideoSelfies
+          .map(v => v.data.video_url || v.data.url)
+          .filter(Boolean)
+          .map(url => ({ url, dest: path.join(videoSelfiesDir, filenameFromUrl(url)) }));
+
+      await downloadMedia([...selfiesToDownload, ...videosToDownload]);
+  }
 }
 
 /**
@@ -671,6 +767,66 @@ async function handleGlobalJournalMenu(uid, headers) {
     }
 }
 
+async function handleExportAll(uid, headers) {
+    console.log('');
+    const doContinue = await askYesNo(
+        'This will download all content from your Kindroid account, including all media.\n  Continue?'
+    );
+    if (!doContinue) {
+        console.log('Bulk export cancelled.');
+        return;
+    }
+
+    console.log('\n--- Starting Full Account Export ---');
+
+    // Export all Kins + Media
+    console.log('\nFetching all Kins...');
+    const aiList = await listAll(`Users/${uid}/AIs`, headers);
+    const kins = (aiList || []).map(d => {
+        const id = docId(d);
+        const decoded = decodeFields(d.fields || {}, uid);
+        return { id, name: decoded.ai_name || `Unnamed Kin (${id})` };
+    });
+
+    if (kins.length > 0) {
+        for (const kin of kins) {
+            try {
+                await exportKin(uid, headers, kin, { forceDownloadMedia: true });
+            } catch (e) {
+                console.error(`\n❌ Kin export failed for ${kin.name}: ${e?.message || e}`);
+            }
+        }
+    } else {
+        console.log('No Kins found to export.');
+    }
+
+    // Export all Group Chats
+    console.log('\nFetching all Group Chats...');
+    const groupList = await listAll(`Users/${uid}/Groups`, headers);
+    const groups = (groupList || []).map(d => {
+        const id = docId(d);
+        const decoded = decodeFields(d.fields || {}, uid);
+        return { id, name: decoded.name || decoded.group_name || decoded.title || `Unnamed Group (${id})` };
+    });
+
+    if (groups.length > 0) {
+        for (const group of groups) {
+            try {
+                await exportGroup(uid, headers, group);
+            } catch (e) {
+                console.error(`\n❌ Group export failed for ${group.name}: ${e?.message || e}`);
+            }
+        }
+    } else {
+        console.log('No Group Chats found to export.');
+    }
+
+    // Export Global Journal
+    await handleGlobalJournalMenu(uid, headers);
+
+    console.log('\n--- ✓ Full Account Export Finished ---');
+}
+
 
 // ================================================================================================
 // --- MAIN EXECUTION ---
@@ -683,7 +839,6 @@ async function main() {
   console.clear();
   console.log('--- KinX - A Kindroid Exporter ---');
 
-  // Securely get the refresh token
   let refreshToken = process.env.KINDROID_REFRESH_TOKEN;
   if (!refreshToken) {
       refreshToken = await promptMasked('Enter Firebase refresh token: ');
@@ -694,7 +849,7 @@ async function main() {
   const headers = createHeaders(id_token);
   console.log(`✓ Authenticated successfully for user: ${user_id}`);
 
-  const topMenuOptions = ['Kins', 'Group Chats', 'Global Journal'];
+  const topMenuOptions = ['Kins', 'Group Chats', 'Global Journal', 'Export All'];
 
   while (true) {
     const { esc, index } = await askMenu('Sources', topMenuOptions, 'Choose source (Esc to exit): ');
@@ -712,6 +867,10 @@ async function main() {
         case 'Global Journal':
             await handleGlobalJournalMenu(user_id, headers);
             break;
+        case 'Export All':
+            await handleExportAll(user_id, headers);
+            // After a full export, return to the main menu
+            break;
     }
   }
 }
@@ -720,6 +879,5 @@ main().then(() => {
   console.log('\nExiting...');
 }).catch((err) => {
   console.error(`\n\n❌ A critical error occurred: ${err.message}`);
-  console.error(err.stack); // For debugging
   process.exit(1);
 });
