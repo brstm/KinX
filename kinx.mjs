@@ -4,7 +4,7 @@
  * to export data for individual "Kins", "Group Chats", or the "Global Journal". It can also perform a
  * full-account backup, including all media files, with a single command.
  *
- * @version 1.3.0
+ * @version 1.3.1
  *
  * @requires Node.js v18+ (for native fetch)
  *
@@ -41,7 +41,7 @@ const CONFIG = {
   DOWNLOAD_CONCURRENCY: 8, // Number of simultaneous media downloads
 
   // A user agent helps identify this script's traffic to the backend API.
-  USER_AGENT: 'KinX-Exporter/1.3.0'
+  USER_AGENT: 'KinX-Exporter/1.3.1'
 };
 
 // ================================================================================================
@@ -164,6 +164,16 @@ async function askYesNo(question) {
         if (answer === 'y' || answer === 'yes') return true;
         if (answer === 'n' || answer === 'no') return false;
     }
+}
+
+/**
+ * Displays a progress message on a single line.
+ * @param {string} message The message to display.
+ */
+function displayProgress(message) {
+  output.clearLine(0);
+  output.cursorTo(0);
+  output.write(`  → ${message}`);
 }
 
 // ================================================================================================
@@ -353,9 +363,10 @@ const stripDocPrefix = (name) => name.replace(/^projects\/[^/]+\/databases\/\(de
  * @param {string} collectionPath The path to the collection (e.g., "Users/uid/AIs").
  * @param {Record<string, string>} headers The request headers.
  * @param {string} [orderByClause] An optional 'orderBy' string (e.g., "timestamp asc").
+ * @param {function(number)} [onProgress] A callback to report progress.
  * @returns {Promise<any[]>} An array of Firestore document objects.
  */
-async function listAll(collectionPath, headers, orderByClause) {
+async function listAll(collectionPath, headers, orderByClause, onProgress = () => {}) {
   const documents = [];
   let pageToken = '';
   do {
@@ -367,6 +378,7 @@ async function listAll(collectionPath, headers, orderByClause) {
     const response = await httpGET(url, headers);
     if (response.documents) {
       documents.push(...response.documents);
+      onProgress(documents.length);
     }
     pageToken = response.nextPageToken || '';
   } while (pageToken);
@@ -390,9 +402,10 @@ function valueForCursor(doc, field) {
  * @param {string} collectionId The ID of the subcollection.
  * @param {Record<string, string>} headers Request headers.
  * @param {string} orderField The field to order results by.
+ * @param {function(number)} [onProgress] A callback to report progress.
  * @returns {Promise<any[]>} An array of Firestore document objects.
  */
-async function runQueryAll(parentDocPath, collectionId, headers, orderField = 'timestamp') {
+async function runQueryAll(parentDocPath, collectionId, headers, orderField = 'timestamp', onProgress = () => {}) {
   const documents = [];
   let lastDoc = null;
 
@@ -420,6 +433,7 @@ async function runQueryAll(parentDocPath, collectionId, headers, orderField = 't
 
     if (docsInPage.length === 0) break;
     documents.push(...docsInPage);
+    onProgress(documents.length);
     lastDoc = docsInPage[docsInPage.length - 1];
     if (docsInPage.length < CONFIG.QUERY_PAGE_SIZE) break;
   }
@@ -432,16 +446,17 @@ async function runQueryAll(parentDocPath, collectionId, headers, orderField = 't
  * @param {string} params.parentDocPath Path to the parent document.
  * @param {string} params.collectionId The collection ID (e.g., 'JournalV3').
  * @param {Record<string, string>} params.headers Request headers.
+ * @param {function(number)} [onProgress] A callback to report progress.
  * @returns {Promise<any[]>} An array of journal document objects.
  */
 async function fetchJournalAll(params) {
-  const { parentDocPath, collectionId, headers } = params;
+  const { parentDocPath, collectionId, headers, onProgress } = params;
   try {
-    return await runQueryAll(parentDocPath, collectionId, headers, 'created');
+    return await runQueryAll(parentDocPath, collectionId, headers, 'created', onProgress);
   } catch (e) {
     if (String(e).includes('PERMISSION_DENIED') || String(e).includes('403')) {
-      console.warn(`  - Query failed (permission denied), attempting fallback list method. This may be slower.`);
-      return await listAll(`${parentDocPath}/${collectionId}`, headers, 'created asc,__name__ asc');
+      console.warn(`\n  - Query failed (permission denied), attempting fallback list method. This may be slower.`);
+      return await listAll(`${parentDocPath}/${collectionId}`, headers, 'created asc,__name__ asc', onProgress);
     }
     throw e;
   }
@@ -471,11 +486,19 @@ function packDocs(docs, uid) {
  * Writes an object to a JSON file, creating directories if needed.
  * @param {string} filePath The full path to the output file.
  * @param {object} object The JavaScript object to serialize.
+ * @param {string} [name] The name of the item being exported, for a one-line completion message.
  */
-async function writeJSON(filePath, object) {
+async function writeJSON(filePath, object, name) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(object, null, 2));
-  console.log(`  → Wrote ${path.basename(filePath)}`);
+  // Clear the progress bar before writing the final message
+  output.clearLine(0);
+  output.cursorTo(0);
+  if (name && object.count === undefined) {
+    console.log(`  ✓ Exported ${name}`);
+  } else {
+    console.log(`  ✓ Exported ${object.count} ${name}`);
+  }
 }
 
 /**
@@ -589,42 +612,48 @@ async function exportKin(uid, headers, kin, options = { forceDownloadMedia: fals
 
   const kinPath = `Users/${uid}/AIs/${kin.id}`;
 
+  displayProgress('Exporting profile...');
   const profileDoc = await httpGET(firestoreUrl(kinPath), headers);
-  await writeJSON(path.join(outputDir, 'profile.json'), packDocs([profileDoc], uid)[0]);
+  await writeJSON(path.join(outputDir, 'profile.json'), packDocs([profileDoc], uid)[0], 'profile');
 
+  // --- Chat Messages ---
   let chatDocs;
   try {
-      chatDocs = await runQueryAll(kinPath, 'ChatMessages', headers, 'timestamp');
+    chatDocs = await runQueryAll(kinPath, 'ChatMessages', headers, 'timestamp', (current) => displayProgress(`Exporting ${current} chat messages`));
   } catch (e) {
-      console.warn(`  - Chat query failed, falling back to list method. Error: ${e.message}`);
-      chatDocs = await listAll(`${kinPath}/ChatMessages`, headers, 'timestamp asc,__name__ asc');
+    console.warn(`\n  - Chat query failed, falling back to list method. Error: ${e.message}`);
+    chatDocs = await listAll(`${kinPath}/ChatMessages`, headers, 'timestamp asc,__name__ asc', (current) => displayProgress(`Exporting ${current} chat messages`));
   }
   await writeJSON(path.join(outputDir, 'chat_messages.json'), {
     count: chatDocs.length, items: packDocs(chatDocs, uid)
-  });
+  }, 'chat messages');
 
-  let pinnedDocs = await listAll(`${kinPath}/PinnedMessages`, headers);
+  // --- Pinned Messages ---
+  let pinnedDocs = await listAll(`${kinPath}/PinnedMessages`, headers, null, (current) => displayProgress(`Exporting ${current} pinned messages`));
   pinnedDocs = sortByCreateTimeAsc(pinnedDocs);
   await writeJSON(path.join(outputDir, 'pinned_messages.json'), {
     count: pinnedDocs.length, items: packDocs(pinnedDocs, uid)
-  });
+  }, 'pinned messages');
 
-  const journalDocs = await fetchJournalAll({ parentDocPath: kinPath, collectionId: 'JournalV3', headers });
+  // --- Journal ---
+  const journalDocs = await fetchJournalAll({ parentDocPath: kinPath, collectionId: 'JournalV3', headers, onProgress: (current) => displayProgress(`Exporting ${current} journal entries`) });
   await writeJSON(path.join(outputDir, 'journal.json'), {
     count: journalDocs.length, items: packDocs(journalDocs, uid)
-  });
+  }, 'journal entries');
 
-  const selfiesDocs = await listAll(`${kinPath}/Selfies`, headers, 'timestamp asc,__name__ asc');
+  // --- Selfies ---
+  const selfiesDocs = await listAll(`${kinPath}/Selfies`, headers, 'timestamp asc,__name__ asc', (current) => displayProgress(`Exporting ${current} selfie descriptions`));
   const packedSelfies = packDocs(selfiesDocs, uid);
   await writeJSON(path.join(outputDir, 'selfies.json'), {
     count: packedSelfies.length, items: packedSelfies
-  });
+  }, 'selfie descriptions');
 
-  const videoSelfiesDocs = await listAll(`${kinPath}/VideoSelfies`, headers, 'timestamp asc,__name__ asc');
+  // --- Video Selfies ---
+  const videoSelfiesDocs = await listAll(`${kinPath}/VideoSelfies`, headers, 'timestamp asc,__name__ asc', (current) => displayProgress(`Exporting ${current} video selfie descriptions`));
   const packedVideoSelfies = packDocs(videoSelfiesDocs, uid);
   await writeJSON(path.join(outputDir, 'video_selfies.json'), {
     count: packedVideoSelfies.length, items: packedVideoSelfies
-  });
+  }, 'video selfie descriptions');
 
   console.log('✓ Kin JSON export complete.');
 
@@ -662,25 +691,28 @@ async function exportGroup(uid, headers, group) {
 
   const groupPath = `Users/${uid}/Groups/${group.id}`;
 
+  displayProgress('Exporting profile...');
   const profileDoc = await httpGET(firestoreUrl(groupPath), headers);
-  await writeJSON(path.join(outputDir, 'profile.json'), packDocs([profileDoc], uid)[0]);
+  await writeJSON(path.join(outputDir, 'profile.json'), packDocs([profileDoc], uid)[0], 'profile');
 
+  // --- Chat Messages ---
   let chatDocs;
   try {
-    chatDocs = await runQueryAll(groupPath, 'ChatMessages', headers, 'timestamp');
+    chatDocs = await runQueryAll(groupPath, 'ChatMessages', headers, 'timestamp', (current) => displayProgress(`Exporting ${current} chat messages`));
   } catch (e) {
-    console.warn(`  - Chat query failed, falling back to list method. Error: ${e.message}`);
-    chatDocs = await listAll(`${groupPath}/ChatMessages`, headers, 'timestamp asc,__name__ asc');
+    console.warn(`\n  - Chat query failed, falling back to list method. Error: ${e.message}`);
+    chatDocs = await listAll(`${groupPath}/ChatMessages`, headers, 'timestamp asc,__name__ asc', (current) => displayProgress(`Exporting ${current} chat messages`));
   }
   await writeJSON(path.join(outputDir, 'chat_messages.json'), {
     count: chatDocs.length, items: packDocs(chatDocs, uid)
-  });
+  }, 'chat messages');
 
-  let pinnedDocs = await listAll(`${groupPath}/PinnedMessages`, headers);
+  // --- Pinned Messages ---
+  let pinnedDocs = await listAll(`${groupPath}/PinnedMessages`, headers, null, (current) => displayProgress(`Exporting ${current} pinned messages`));
   pinnedDocs = sortByCreateTimeAsc(pinnedDocs);
   await writeJSON(path.join(outputDir, 'pinned_messages.json'), {
     count: pinnedDocs.length, items: packDocs(pinnedDocs, uid)
-  });
+  }, 'pinned messages');
 
   console.log('✓ Group export complete.');
 }
@@ -751,20 +783,18 @@ async function handleGroupsMenu(uid, headers) {
 async function handleGlobalJournalMenu(uid, headers) {
     const outputDir = CONFIG.GLOBAL_PARENT_DIR;
     console.log(`\nExporting Global Journal to "${outputDir}"...`);
-    try {
-        const journalDocs = await fetchJournalAll({
-            parentDocPath: `Users/${uid}`,
-            collectionId: 'GlobalJournalV3',
-            headers
-        });
-        await writeJSON(path.join(outputDir, 'global_journal.json'), {
-            count: journalDocs.length,
-            items: packDocs(journalDocs, uid)
-        });
-        console.log('✓ Global Journal export complete.');
-    } catch (e) {
-        console.error(`\n❌ Global Journal export failed: ${e?.message || e}`);
-    }
+
+    const journalDocs = await fetchJournalAll({
+        parentDocPath: `Users/${uid}`,
+        collectionId: 'GlobalJournalV3',
+        headers,
+        onProgress: (current) => displayProgress(`Exporting ${current} journal entries`)
+    });
+    await writeJSON(path.join(outputDir, 'global_journal.json'), {
+        count: journalDocs.length,
+        items: packDocs(journalDocs, uid)
+    }, 'journal entries');
+    console.log('✓ Global Journal export complete.');
 }
 
 async function handleExportAll(uid, headers) {
@@ -806,7 +836,8 @@ async function handleExportAll(uid, headers) {
     const groups = (groupList || []).map(d => {
         const id = docId(d);
         const decoded = decodeFields(d.fields || {}, uid);
-        return { id, name: decoded.name || decoded.group_name || decoded.title || `Unnamed Group (${id})` };
+        const name = decoded.name || decoded.group_name || decoded.title || `Unnamed Group (${id})`;
+        return { id, name };
     });
 
     if (groups.length > 0) {
@@ -845,38 +876,43 @@ async function main() {
   }
   if (!refreshToken) throw new Error('No refresh token provided.');
 
-  const { id_token, user_id } = await refreshIdToken(refreshToken);
-  const headers = createHeaders(id_token);
-  console.log(`✓ Authenticated successfully for user: ${user_id}`);
+  try {
+    const { id_token, user_id } = await refreshIdToken(refreshToken);
+    const headers = createHeaders(id_token);
+    console.log(`✓ Authenticated successfully for user: ${user_id}`);
 
-  const topMenuOptions = ['Kins', 'Group Chats', 'Global Journal', 'Export All'];
+    const topMenuOptions = ['Export Kin', 'Export Group Chat', 'Export Global Journal', 'Export All'];
 
-  while (true) {
-    const { esc, index } = await askMenu('Sources', topMenuOptions, 'Choose source (Esc to exit): ');
-    if (esc) break;
-    if (index === -1) continue;
+    while (true) {
+      const { esc, index } = await askMenu('Main Menu', topMenuOptions, 'Choose action (Esc to exit): ');
+      if (esc) break;
+      if (index === -1) continue;
 
-    const selection = topMenuOptions[index];
-    switch (selection) {
-        case 'Kins':
-            await handleKinsMenu(user_id, headers);
-            break;
-        case 'Group Chats':
-            await handleGroupsMenu(user_id, headers);
-            break;
-        case 'Global Journal':
-            await handleGlobalJournalMenu(user_id, headers);
-            break;
-        case 'Export All':
-            await handleExportAll(user_id, headers);
-            // After a full export, return to the main menu
-            break;
+      const selection = topMenuOptions[index];
+      switch (selection) {
+          case 'Export Kin':
+              await handleKinsMenu(user_id, headers);
+              break;
+          case 'Export Group Chat':
+              await handleGroupsMenu(user_id, headers);
+              break;
+          case 'Export Global Journal':
+              await handleGlobalJournalMenu(user_id, headers);
+              break;
+          case 'Export All':
+              await handleExportAll(user_id, headers);
+              // After a full export, return to the main menu
+              break;
+      }
     }
+  } catch (err) {
+    console.error(`\n\n❌ A critical error occurred: ${err.message}`);
+    process.exit(1);
   }
 }
 
 main().then(() => {
-  console.log('\nExiting...');
+  console.log('\nExiting.');
 }).catch((err) => {
   console.error(`\n\n❌ A critical error occurred: ${err.message}`);
   process.exit(1);
